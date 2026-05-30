@@ -665,31 +665,22 @@ DONE:
     return success;
 }
 
-static bool backupPartitionToSd(const esp_partition_t *partition, const String &filePath) {
-    File out = SDM.open(filePath, FILE_WRITE);
-    if (!out) return false;
-
+static bool backupPartitionToFile(
+    const esp_partition_t *partition, File &out, size_t totalBytes, size_t alreadyDone
+) {
     constexpr size_t kBufSize = 4096;
     std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kBufSize]);
-    if (!buf) { out.close(); return false; }
+    if (!buf) return false;
 
     size_t done = 0;
-    progressHandler(0, partition->size);
     while (done < partition->size) {
         const size_t toRead = min(kBufSize, partition->size - done);
-        if (esp_partition_read(partition, done, buf.get(), toRead) != ESP_OK) {
-            out.close();
-            return false;
-        }
-        if (out.write(buf.get(), toRead) != toRead) {
-            out.close();
-            return false;
-        }
+        if (esp_partition_read(partition, done, buf.get(), toRead) != ESP_OK) return false;
+        if (out.write(buf.get(), toRead) != toRead) return false;
         done += toRead;
-        progressHandler(done, partition->size);
+        progressHandler(alreadyDone + done, totalBytes);
         launcherDelayMs(1);
     }
-    out.close();
     return true;
 }
 
@@ -697,30 +688,47 @@ static void backupFlashDataToSd() {
     pauseSdInstallInput();
     if (!SDM.exists("/backups")) SDM.mkdir("/backups");
 
-    const esp_partition_t *spiffs = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
-    if (spiffs) {
-        displayRedStripe("Backing up SPIFFS...");
-        prog_handler = 1;
-        backupPartitionToSd(spiffs, "/backups/spiffs.bin");
+    const esp_partition_t *parts[3] = {};
+    uint8_t count = 0;
+    const esp_partition_t *p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+    if (p) parts[count++] = p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "vfs");
+    if (p) parts[count++] = p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "sys");
+    if (p) parts[count++] = p;
+
+    size_t totalBytes = 0;
+    for (uint8_t i = 0; i < count; i++) totalBytes += parts[i]->size;
+
+    File out = SDM.open("/backups/flash_data.bin", FILE_WRITE);
+    if (!out) { resumeSdInstallInput(); return; }
+
+    // Header: 4-byte magic, partition count, then per-partition (16-byte label, 4-byte address, 4-byte size)
+    const uint8_t magic[4] = { 0x4C, 0x46, 0x42, 0x4B }; // "LFBK"
+    out.write(magic, 4);
+    out.write(&count, 1);
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t label[16] = {};
+        strncpy(reinterpret_cast<char *>(label), parts[i]->label, 16);
+        out.write(label, 16);
+        uint32_t addr = parts[i]->address;
+        out.write(reinterpret_cast<const uint8_t *>(&addr), 4);
+        uint32_t sz = parts[i]->size;
+        out.write(reinterpret_cast<const uint8_t *>(&sz), 4);
     }
 
-    const esp_partition_t *fatVfs = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "vfs");
-    if (fatVfs) {
-        displayRedStripe("Backing up FAT vfs...");
-        prog_handler = 1;
-        backupPartitionToSd(fatVfs, "/backups/fat_vfs.bin");
+    displayRedStripe("Backing up flash...");
+    prog_handler = 1;
+    progressHandler(0, totalBytes);
+
+    size_t done = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (!backupPartitionToFile(parts[i], out, totalBytes, done)) break;
+        done += parts[i]->size;
     }
 
-    const esp_partition_t *fatSys = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "sys");
-    if (fatSys) {
-        displayRedStripe("Backing up FAT sys...");
-        prog_handler = 1;
-        backupPartitionToSd(fatSys, "/backups/fat_sys.bin");
-    }
-
+    out.close();
     resumeSdInstallInput();
 }
 
