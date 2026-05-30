@@ -392,8 +392,8 @@ void setUiColor() {
              FGCOLOR = 0xFFE0;
              BGCOLOR = 0x0000;
              ALCOLOR = 0xFB80;
-             odd_color = 0x9480;
-             even_color = 0xbae0;
+             odd_color = 0x6320;
+             even_color = 0xAD40;
          }                 },
         {"Purple",
          [&]() {

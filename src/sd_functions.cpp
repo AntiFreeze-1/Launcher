@@ -665,6 +665,77 @@ DONE:
     return success;
 }
 
+static bool backupPartitionToFile(
+    const esp_partition_t *partition, File &out, size_t totalBytes, size_t alreadyDone
+) {
+    constexpr size_t kBufSize = 4096;
+    std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kBufSize]);
+    if (!buf) return false;
+
+    size_t done = 0;
+    while (done < partition->size) {
+        const size_t toRead = min(kBufSize, static_cast<size_t>(partition->size) - done);
+        if (esp_partition_read(partition, done, buf.get(), toRead) != ESP_OK) return false;
+        if (out.write(buf.get(), toRead) != toRead) return false;
+        done += toRead;
+        progressHandler(alreadyDone + done, totalBytes);
+        launcherDelayMs(1);
+    }
+    return true;
+}
+
+static void backupFlashDataToSd() {
+    pauseSdInstallInput();
+    if (!SDM.exists("/backups")) SDM.mkdir("/backups");
+
+    const esp_partition_t *parts[3] = {};
+    uint8_t count = 0;
+    const esp_partition_t *p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+    if (p) parts[count++] = p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "vfs");
+    if (p) parts[count++] = p;
+    p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "sys");
+    if (p) parts[count++] = p;
+
+    size_t totalBytes = 0;
+    for (uint8_t i = 0; i < count; i++) totalBytes += parts[i]->size;
+
+    String filename = keyboard("flash_data", 40, "Backup filename:");
+    if (filename == "" || filename == String((char)KEY_ESCAPE)) { resumeSdInstallInput(); return; }
+    if (!filename.endsWith(".bin")) filename += ".bin";
+
+    File out = SDM.open("/backups/" + filename, FILE_WRITE);
+    if (!out) { resumeSdInstallInput(); return; }
+
+    // Header: 4-byte magic, partition count, then per-partition (16-byte label, 4-byte address, 4-byte size)
+    const uint8_t magic[4] = { 0x4C, 0x46, 0x42, 0x4B }; // "LFBK"
+    out.write(magic, 4);
+    out.write(&count, 1);
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t label[16] = {};
+        strncpy(reinterpret_cast<char *>(label), parts[i]->label, 16);
+        out.write(label, 16);
+        uint32_t addr = parts[i]->address;
+        out.write(reinterpret_cast<const uint8_t *>(&addr), 4);
+        uint32_t sz = parts[i]->size;
+        out.write(reinterpret_cast<const uint8_t *>(&sz), 4);
+    }
+
+    displayRedStripe("Backing up flash...");
+    prog_handler = 1;
+    progressHandler(0, totalBytes);
+
+    size_t done = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        if (!backupPartitionToFile(parts[i], out, totalBytes, done)) break;
+        done += parts[i]->size;
+    }
+
+    out.close();
+    resumeSdInstallInput();
+}
+
 /***************************************************************************************
 ** Function name: updateFromSD
 ** Description:   this function analyse the .bin and calls performUpdate
@@ -684,6 +755,25 @@ void updateFromSD(String path) {
     if (!file) goto Exit;
     if (!file.seek(0x8000)) goto Exit;
     file.read(partitionEntry, 16);
+
+    {
+        bool doBackup = false;
+        options = {
+            {"Back up data", [&]() { doBackup = true; }},
+            {"Skip backup",  [&]() { doBackup = false; }},
+            {"Cancel",       [&]() { returnToMenu = true; }},
+        };
+        if (loopOptions(options) < 0 || returnToMenu) {
+            file.close();
+            tft->fillScreen(BGCOLOR);
+            return;
+        }
+        tft->fillRoundRect(6, 6, tftWidth - 12, tftHeight - 12, 5, BGCOLOR);
+        if (doBackup) {
+            backupFlashDataToSd();
+            tft->fillRoundRect(6, 6, tftWidth - 12, tftHeight - 12, 5, BGCOLOR);
+        }
+    }
 
     if (partitionEntry[0] != 0xAA || partitionEntry[1] != 0x50 || partitionEntry[2] != 0x01) {
         app_size = effectiveSdAppSize(file, 0, file.size());
