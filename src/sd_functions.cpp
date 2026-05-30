@@ -674,7 +674,7 @@ static bool backupPartitionToFile(
 
     size_t done = 0;
     while (done < partition->size) {
-        const size_t toRead = min(kBufSize, partition->size - done);
+        const size_t toRead = min(kBufSize, static_cast<size_t>(partition->size) - done);
         if (esp_partition_read(partition, done, buf.get(), toRead) != ESP_OK) return false;
         if (out.write(buf.get(), toRead) != toRead) return false;
         done += toRead;
