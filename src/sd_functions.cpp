@@ -665,6 +665,65 @@ DONE:
     return success;
 }
 
+static bool backupPartitionToSd(const esp_partition_t *partition, const String &filePath) {
+    File out = SDM.open(filePath, FILE_WRITE);
+    if (!out) return false;
+
+    constexpr size_t kBufSize = 4096;
+    std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kBufSize]);
+    if (!buf) { out.close(); return false; }
+
+    size_t done = 0;
+    progressHandler(0, partition->size);
+    while (done < partition->size) {
+        const size_t toRead = min(kBufSize, partition->size - done);
+        if (esp_partition_read(partition, done, buf.get(), toRead) != ESP_OK) {
+            out.close();
+            return false;
+        }
+        if (out.write(buf.get(), toRead) != toRead) {
+            out.close();
+            return false;
+        }
+        done += toRead;
+        progressHandler(done, partition->size);
+        launcherDelayMs(1);
+    }
+    out.close();
+    return true;
+}
+
+static void backupFlashDataToSd() {
+    pauseSdInstallInput();
+    if (!SDM.exists("/backups")) SDM.mkdir("/backups");
+
+    const esp_partition_t *spiffs = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+    if (spiffs) {
+        displayRedStripe("Backing up SPIFFS...");
+        prog_handler = 1;
+        backupPartitionToSd(spiffs, "/backups/spiffs.bin");
+    }
+
+    const esp_partition_t *fatVfs = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "vfs");
+    if (fatVfs) {
+        displayRedStripe("Backing up FAT vfs...");
+        prog_handler = 1;
+        backupPartitionToSd(fatVfs, "/backups/fat_vfs.bin");
+    }
+
+    const esp_partition_t *fatSys = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "sys");
+    if (fatSys) {
+        displayRedStripe("Backing up FAT sys...");
+        prog_handler = 1;
+        backupPartitionToSd(fatSys, "/backups/fat_sys.bin");
+    }
+
+    resumeSdInstallInput();
+}
+
 /***************************************************************************************
 ** Function name: updateFromSD
 ** Description:   this function analyse the .bin and calls performUpdate
@@ -684,6 +743,25 @@ void updateFromSD(String path) {
     if (!file) goto Exit;
     if (!file.seek(0x8000)) goto Exit;
     file.read(partitionEntry, 16);
+
+    {
+        bool doBackup = false;
+        options = {
+            {"Back up data", [&]() { doBackup = true; }},
+            {"Skip backup",  [&]() { doBackup = false; }},
+            {"Cancel",       [&]() { returnToMenu = true; }},
+        };
+        if (loopOptions(options) < 0 || returnToMenu) {
+            file.close();
+            tft->fillScreen(BGCOLOR);
+            return;
+        }
+        tft->fillRoundRect(6, 6, tftWidth - 12, tftHeight - 12, 5, BGCOLOR);
+        if (doBackup) {
+            backupFlashDataToSd();
+            tft->fillRoundRect(6, 6, tftWidth - 12, tftHeight - 12, 5, BGCOLOR);
+        }
+    }
 
     if (partitionEntry[0] != 0xAA || partitionEntry[1] != 0x50 || partitionEntry[2] != 0x01) {
         app_size = effectiveSdAppSize(file, 0, file.size());
