@@ -701,7 +701,11 @@ static void backupFlashDataToSd() {
     size_t totalBytes = 0;
     for (uint8_t i = 0; i < count; i++) totalBytes += parts[i]->size;
 
-    File out = SDM.open("/backups/flash_data.bin", FILE_WRITE);
+    String filename = keyboard("flash_data", 40, "Backup filename:");
+    if (filename == "" || filename == String((char)KEY_ESCAPE)) { resumeSdInstallInput(); return; }
+    if (!filename.endsWith(".bin")) filename += ".bin";
+
+    File out = SDM.open("/backups/" + filename, FILE_WRITE);
     if (!out) { resumeSdInstallInput(); return; }
 
     // Header: 4-byte magic, partition count, then per-partition (16-byte label, 4-byte address, 4-byte size)
